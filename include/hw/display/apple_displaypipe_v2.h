@@ -1,7 +1,7 @@
 /*
  * Apple Display Pipe V2 Controller.
  *
- * Copyright (c) 2023-2024 Visual Ehrmanntraut.
+ * Copyright (c) 2023-2025 Visual Ehrmanntraut.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -63,9 +63,9 @@ struct AppleDisplayPipeV2State {
     uint32_t int_filter;
     GenPipeState genpipes[2];
     QemuConsole *console;
+    bool invalidated;
 };
 
-AppleDisplayPipeV2State *apple_displaypipe_v2_create(MachineState *machine,
-                                                     DTBNode *node);
+AppleDisplayPipeV2State *apple_displaypipe_v2_create(DTBNode *node);
 
 #endif /* APPLE_DISPLAYPIPE_V2_H */

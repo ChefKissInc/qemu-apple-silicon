@@ -1,8 +1,8 @@
 /*
  * Apple Display Pipe V2 Controller.
  *
- * Copyright (c) 2023-2024 Visual Ehrmanntraut (VisualEhrmanntraut).
- * Copyright (c) 2023 Christian Inci (chris-pcguy).
+ * Copyright (c) 2023-2025 Visual Ehrmanntraut (VisualEhrmanntraut).
+ * Copyright (c) 2023-2025 Christian Inci (chris-pcguy).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -24,6 +24,7 @@
 #include "hw/display/apple_displaypipe_v2.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
+#include "hw/resettable.h"
 #include "qemu/log.h"
 #include "qom/object.h"
 #include "sysemu/dma.h"
@@ -141,15 +142,15 @@ static void apple_disp_gp_reg_write(GenPipeState *s, hwaddr addr, uint64_t data)
         break;
     }
     case REG_GP_LAYER_0_STRIDE: {
-        s->layers[0].stride = (uint32_t)data;
         DISP_DBGLOG("[GP%zu] Layer 0 stride <- 0x" HWADDR_FMT_plx, s->index,
                     data);
+        s->layers[0].stride = (uint32_t)data;
         break;
     }
     case REG_GP_LAYER_0_SIZE: {
-        s->layers[0].size = (uint32_t)data;
         DISP_DBGLOG("[GP%zu] Layer 0 size <- 0x" HWADDR_FMT_plx, s->index,
                     data);
+        s->layers[0].size = (uint32_t)data;
         break;
     }
     case REG_GP_FRAME_SIZE: {
@@ -271,13 +272,17 @@ static void apple_gp_draw_bh(void *opaque)
     uint16_t stride = s->pixel_format & GP_PIXEL_FORMAT_COMPRESSED ?
                           width :
                           s->layers[0].stride;
+#if 1
     for (uint16_t y = 0; y < height; y++) {
         uint8_t *dest = memory_region_get_ram_ptr(s->vram);
+#if 1
         memcpy(dest + (y * (s->disp_state->width * sizeof(uint32_t))),
                buf + (y * stride), width * sizeof(uint32_t));
+#endif
     }
     memory_region_set_dirty(s->vram, 0,
                             s->height * s->width * sizeof(uint32_t));
+#endif
     g_free(buf);
     // TODO: bit 10 might be VBlank, and bit 20 that the transfer finished.
     s->disp_state->int_filter |= BIT(10) | BIT(20);
@@ -378,36 +383,42 @@ static const MemoryRegionOps apple_disp_v2_reg_ops = {
     .valid.unaligned = false,
 };
 
-AppleDisplayPipeV2State *apple_displaypipe_v2_create(MachineState *machine,
-                                                     DTBNode *node)
+static uint32_t disp_timing_info[] = { 0x33C, 0x90, 0x1, 0x1,
+                                       0x700, 0x1,  0x1, 0x1 };
+
+AppleDisplayPipeV2State *apple_displaypipe_v2_create(DTBNode *node)
 {
     DeviceState *dev;
     SysBusDevice *sbd;
     AppleDisplayPipeV2State *s;
+    DTBProp *prop;
+    uint64_t *reg;
+    int i;
 
     dev = qdev_new(TYPE_APPLE_DISPLAYPIPE_V2);
     sbd = SYS_BUS_DEVICE(dev);
     s = APPLE_DISPLAYPIPE_V2(sbd);
 
-    g_assert_nonnull(
-        set_dtb_prop(node, "display-target", 15, "DisplayTarget5"));
-    uint32_t dispTimingInfo[] = { 0x33C, 0x90, 0x1, 0x1, 0x700, 0x1, 0x1, 0x1 };
-    g_assert_nonnull(set_dtb_prop(node, "display-timing-info",
-                                  sizeof(dispTimingInfo), &dispTimingInfo));
-    uint32_t data = 0xD;
-    g_assert_nonnull(set_dtb_prop(node, "bics-param-set", sizeof(data), &data));
-    uint32_t dot_pitch = 326;
-    g_assert_nonnull(
-        set_dtb_prop(node, "dot-pitch", sizeof(dot_pitch), &dot_pitch));
-    g_assert_nonnull(set_dtb_prop(node, "function-brightness_update", 0, ""));
+    dtb_set_prop(node, "display-target", 15, "DisplayTarget5");
+    dtb_set_prop(node, "display-timing-info", sizeof(disp_timing_info),
+                 disp_timing_info);
+    dtb_set_prop_u32(node, "bics-param-set", 0xD);
+    dtb_set_prop_u32(node, "dot-pitch", 326);
+    dtb_set_prop_null(node, "function-brightness_update");
 
-    DTBProp *prop = find_dtb_prop(node, "reg");
+    prop = dtb_find_prop(node, "reg");
     g_assert_nonnull(prop);
-    uint64_t *reg = (uint64_t *)prop->value;
+    reg = (uint64_t *)prop->data;
     memory_region_init_io(&s->up_regs, OBJECT(sbd), &apple_disp_v2_reg_ops, sbd,
                           "up.regs", reg[1]);
     sysbus_init_mmio(sbd, &s->up_regs);
     object_property_add_const_link(OBJECT(sbd), "up.regs", OBJECT(&s->up_regs));
+
+    s->invalidated = true;
+
+    for (i = 0; i < 9; i++) {
+        sysbus_init_irq(sbd, &s->irqs[i]);
+    }
 
     return s;
 }
@@ -418,10 +429,16 @@ static void apple_displaypipe_v2_draw_row(void *opaque, uint8_t *dest,
 {
     while (width--) {
         uint32_t colour = ldl_le_p(src);
-        src += sizeof(colour);
         memcpy(dest, &colour, sizeof(colour));
+        src += sizeof(colour);
         dest += sizeof(colour);
     }
+}
+
+static void apple_displaypipe_v2_invalidate(void *opaque)
+{
+    AppleDisplayPipeV2State *s = APPLE_DISPLAYPIPE_V2(opaque);
+    s->invalidated = true;
 }
 
 static void apple_displaypipe_v2_gfx_update(void *opaque)
@@ -432,10 +449,12 @@ static void apple_displaypipe_v2_gfx_update(void *opaque)
     int stride = s->width * sizeof(uint32_t);
     int first = 0, last = 0;
 
-    if (!s->vram_section.mr) {
+    if (s->invalidated) {
         framebuffer_update_memory_section(&s->vram_section, &s->vram, 0,
                                           s->height, stride);
+        s->invalidated = false;
     }
+
     framebuffer_update_display(surface, &s->vram_section, s->width, s->height,
                                stride, stride, 0, 0,
                                apple_displaypipe_v2_draw_row, s, &first, &last);
@@ -445,17 +464,23 @@ static void apple_displaypipe_v2_gfx_update(void *opaque)
 }
 
 static const GraphicHwOps apple_displaypipe_v2_ops = {
+    .invalidate = apple_displaypipe_v2_invalidate,
     .gfx_update = apple_displaypipe_v2_gfx_update,
 };
 
-static void apple_displaypipe_v2_reset(DeviceState *dev)
+static void apple_displaypipe_v2_reset_hold(Object *obj, ResetType type)
 {
-    AppleDisplayPipeV2State *s = APPLE_DISPLAYPIPE_V2(dev);
+    AppleDisplayPipeV2State *s = APPLE_DISPLAYPIPE_V2(obj);
 
+    s->invalidated = true;
     s->int_filter = 0;
     qemu_irq_lower(s->irqs[0]);
     apple_genpipev2_init(&s->genpipes[0], 0, &s->vram, &s->dma_as, s);
     apple_genpipev2_init(&s->genpipes[1], 1, &s->vram, &s->dma_as, s);
+
+    memset(memory_region_get_ram_ptr(&s->vram), 0,
+           memory_region_size(&s->vram));
+    memory_region_set_dirty(&s->vram, 0, memory_region_size(&s->vram));
 }
 
 static void apple_displaypipe_v2_realize(DeviceState *dev, Error **errp)
@@ -467,23 +492,21 @@ static void apple_displaypipe_v2_realize(DeviceState *dev, Error **errp)
 }
 
 static Property apple_displaypipe_v2_props[] = {
-    // iPhone 4/4S
-    DEFINE_PROP_UINT32("width", AppleDisplayPipeV2State, width, 640),
-    DEFINE_PROP_UINT32("height", AppleDisplayPipeV2State, height, 960),
-    // iPhone 11
-    // DEFINE_PROP_UINT32("width", AppleDisplayPipeV2State, width, 828),
-    // DEFINE_PROP_UINT32("height", AppleDisplayPipeV2State, height, 1792),
+    DEFINE_PROP_UINT32("width", AppleDisplayPipeV2State, width, 828),
+    DEFINE_PROP_UINT32("height", AppleDisplayPipeV2State, height, 1792),
     DEFINE_PROP_END_OF_LIST(),
 };
 
 static void apple_displaypipe_v2_class_init(ObjectClass *klass, void *data)
 {
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
+    rc->phases.hold = apple_displaypipe_v2_reset_hold;
+
     device_class_set_props(dc, apple_displaypipe_v2_props);
     dc->realize = apple_displaypipe_v2_realize;
-    dc->reset = apple_displaypipe_v2_reset;
+    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
 static const TypeInfo apple_displaypipe_v2_type_info = {

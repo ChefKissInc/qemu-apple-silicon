@@ -1,13 +1,9 @@
 #include "qemu/osdep.h"
-#include "hw/arm/apple-silicon/boot.h"
 #include "hw/arm/apple-silicon/dtb.h"
 #include "hw/block/apple_ans.h"
-#include "hw/block/block.h"
 #include "hw/irq.h"
 #include "hw/misc/apple-silicon/a7iop/rtbuddy.h"
 #include "hw/nvme/nvme.h"
-#include "hw/pci/msi.h"
-#include "hw/pci/msix.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pcie_host.h"
 #include "migration/vmstate.h"
@@ -15,7 +11,6 @@
 #include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "sysemu/dma.h"
 
 // #define DEBUG_ANS
 #ifdef DEBUG_ANS
@@ -211,10 +206,10 @@ SysBusDevice *apple_ans_create(DTBNode *node, AppleA7IOPVersion version,
     sbd = SYS_BUS_DEVICE(dev);
     pex = PCIE_HOST_BRIDGE(dev);
 
-    prop = find_dtb_prop(node, "reg");
+    prop = dtb_find_prop(node, "reg");
     assert(prop);
 
-    reg = (uint64_t *)prop->value;
+    reg = (uint64_t *)prop->data;
 
     s->rtb = apple_rtbuddy_new(s, "ANS2", reg[1], version, protocol_version,
                                &ans_mailbox_ops);
@@ -233,12 +228,11 @@ SysBusDevice *apple_ans_create(DTBNode *node, AppleA7IOPVersion version,
     sysbus_pass_irq(sbd, SYS_BUS_DEVICE(s->rtb));
     sysbus_init_irq(sbd, &s->irq);
 
-    child = get_dtb_node(node, "iop-ans-nub");
+    child = dtb_get_node(node, "iop-ans-nub");
     assert(child);
 
-    data = 1;
-    set_dtb_prop(child, "pre-loaded", 4, (uint8_t *)&data);
-    set_dtb_prop(child, "running", 4, (uint8_t *)&data);
+    dtb_set_prop_u32(child, "pre-loaded", 1);
+    dtb_set_prop_u32(child, "running", 1);
 
     object_initialize_child(OBJECT(dev), "nvme", &s->nvme, TYPE_NVME);
 
@@ -315,7 +309,7 @@ static void apple_ans_class_init(ObjectClass *klass, void *data)
 
     dc->realize = apple_ans_realize;
     dc->unrealize = apple_ans_unrealize;
-    /* dc->reset = apple_ans_reset; */
+    /* device_class_set_legacy_reset(dc, apple_ans_reset); */
     dc->desc = "Apple ANS NVMe";
     dc->vmsd = &vmstate_apple_ans;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);

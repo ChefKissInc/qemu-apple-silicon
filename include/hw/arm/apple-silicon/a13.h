@@ -1,8 +1,8 @@
 /*
  * Apple A13 CPU.
  *
- * Copyright (c) 2023-2024 Visual Ehrmanntraut (VisualEhrmanntraut).
- * Copyright (c) 2023 Christian Inci (chris-pcguy).
+ * Copyright (c) 2023-2025 Visual Ehrmanntraut (VisualEhrmanntraut).
+ * Copyright (c) 2023-2025 Christian Inci (chris-pcguy).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -30,8 +30,6 @@
 
 #define A13_MAX_CPU 6
 #define A13_MAX_CLUSTER 2
-#define A13_NUM_ECORE 2
-#define A13_NUM_PCORE 4
 
 #define TYPE_APPLE_A13 "apple-a13-cpu"
 OBJECT_DECLARE_TYPE(AppleA13State, AppleA13Class, APPLE_A13)
@@ -51,7 +49,7 @@ typedef struct AppleA13Class {
     /*< public >*/
     DeviceRealize parent_realize;
     DeviceUnrealize parent_unrealize;
-    DeviceReset parent_reset;
+    ResettablePhases parent_phases;
 } AppleA13Class;
 
 typedef struct AppleA13State {
@@ -132,6 +130,7 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
 bool apple_a13_cpu_is_sleep(AppleA13State *tcpu);
 bool apple_a13_cpu_is_powered_off(AppleA13State *tcpu);
 void apple_a13_cpu_start(AppleA13State *tcpu);
+void apple_a13_cpu_reset(AppleA13State *tcpu);
 void apple_a13_cpu_off(AppleA13State *tcpu);
 
 #endif /* HW_ARM_APPLE_SILICON_A13_H */

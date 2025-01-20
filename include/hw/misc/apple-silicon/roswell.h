@@ -1,7 +1,7 @@
 /*
  * Apple Roswell.
  *
- * Copyright (c) 2023-2024 Visual Ehrmanntraut.
+ * Copyright (c) 2023-2025 Visual Ehrmanntraut.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -33,7 +33,5 @@ struct AppleRoswellState {
 
     /*< public >*/
 };
-
-void apple_roswell_create(MachineState *machine, uint8_t addr);
 
 #endif /* HW_MISC_APPLE_SILICON_ROSWELL_H */

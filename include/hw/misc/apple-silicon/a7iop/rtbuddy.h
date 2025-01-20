@@ -81,7 +81,7 @@ struct AppleRTBuddyClass {
     SysBusDevice base_class;
 
     /*< public >*/
-    DeviceReset parent_reset;
+    ResettablePhases parent_reset;
 };
 
 struct AppleRTBuddy {

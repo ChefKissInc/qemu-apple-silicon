@@ -224,6 +224,8 @@ static void dwc3_bd_map(DWC3State *s, DWC3BufferDesc *desc, USBPacket *p)
             mem = dma_memory_map(desc->sgl.as, base, &xlen, dir,
                                  MEMTXATTRS_UNSPECIFIED);
             if (!mem) {
+                // is it correct to set mapped to true even in this error case?
+                qemu_log_mask(LOG_GUEST_ERROR, "%s: !mem: base: 0x%" HWADDR_PRIx " len: 0x%" HWADDR_PRIx "\n", __func__, base, len);
                 faulted = true;
                 s->gbuserraddrlo = base;
                 s->gbuserraddrhi = base >> 32;
@@ -243,6 +245,9 @@ static void dwc3_bd_map(DWC3State *s, DWC3BufferDesc *desc, USBPacket *p)
 
 static void dwc3_bd_unmap(DWC3State *s, DWC3BufferDesc *desc)
 {
+    if (!desc->mapped) {
+        return;
+    }
     desc->mapped = false;
     for (int i = 0; i < desc->iov.niov; i++) {
         if (desc->iov.iov[i].iov_base) {
@@ -267,6 +272,7 @@ static bool dwc3_bd_writeback(DWC3State *s, DWC3BufferDesc *desc, USBPacket *p,
                         (usb_packet_size(p) % p->ep->max_packet_size != 0 ||
                          usb_packet_size(p) == 0);
 
+    //desc->mapped = false;
     while (j < desc->iov.niov && unmap_length > 0) {
         int access_len = desc->iov.iov[j].iov_len;
         if (access_len > unmap_length) {
@@ -336,7 +342,7 @@ static bool dwc3_bd_writeback(DWC3State *s, DWC3BufferDesc *desc, USBPacket *p,
                             goto short_complete;
                             break;
                         case TRB_CTRL_CHN: {
-                            for (int j = 0; j < desc->count; j++) {
+                            for (j = 0; j < desc->count; j++) {
                                 ioc |= (desc->trbs[j].ctrl & TRB_CTRL_IOC) != 0;
                                 isp |= (desc->trbs[j].ctrl &
                                         TRB_CTRL_ISP_IMI) != 0;
@@ -394,14 +400,33 @@ static int dwc3_bd_copy(DWC3State *s, DWC3BufferDesc *desc, USBPacket *p)
 
     // assert(p->actual_length == 0);
 
-    dwc3_bd_map(s, desc, p);
+    //dwc3_bd_map(s, desc, p); // moved down, not anymore, now again
 
     xfer_size = packet_left;
     if (xfer_size > desc_left) {
         xfer_size = desc_left;
     }
 
+    //dwc3_bd_map(s, desc, p); // is that actually needed here?
+
+#if 0
+    if (xfer_size == 0) {
+        desc->ended = true;
+        dwc3_bd_writeback(s, desc, p, 0);
+        p->status = USB_RET_SUCCESS;
+#if 0
+        dwc3_bd_unmap(s, desc); // and thus, this?
+#endif
+        return xfer_size;
+    }
+#endif
+
+    dwc3_bd_map(s, desc, p);
+
     buffer = g_malloc0(xfer_size);
+    if (buffer == NULL) {
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: buffer == NULL ; xfer_size 0x%x\n", __func__, xfer_size);
+    }
     if (p->pid == USB_TOKEN_IN) {
 #if 1
         DPRINTF("%s IN Transfer 0x%x on EP %d to 0x%llx\n", __func__, xfer_size,
@@ -440,20 +465,31 @@ static int dwc3_bd_copy(DWC3State *s, DWC3BufferDesc *desc, USBPacket *p)
     if (desc->length - desc->actual_length > 0 && packet_left > 0 &&
         packet_left % p->ep->max_packet_size == 0) {
         p->status = USB_RET_SUCCESS;
+        if (buffer == NULL) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: buffer == NULL ; xfer_size 0x%x if_0: USB_RET_SUCCESS\n", __func__, xfer_size);
+        }
         return xfer_size;
     }
 
     desc->ended = true;
     if (dwc3_bd_writeback(s, desc, p, actual_xfer < xfer_size)) {
         p->status = USB_RET_SUCCESS;
+        if (buffer == NULL) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: buffer == NULL ; xfer_size 0x%x if_1: USB_RET_SUCCESS; actual_xfer < xfer_size %u ; actual_xfer %u ; xfer_size %u\n", __func__, xfer_size, actual_xfer < xfer_size, actual_xfer, xfer_size);
+        }
     } else {
-        struct dwc3_event_depevt event = { .endpoint_number = desc->epid,
-                                           .endpoint_event =
-                                               DEPEVT_XFERNOTREADY };
-        event.status |= DEPEVT_STATUS_TRANSFER_ACTIVE;
-        p->status = USB_RET_ASYNC;
-        dwc3_ep_event(s, desc->epid, event);
+        //struct dwc3_event_depevt event = { .endpoint_number = desc->epid,
+        //                                   .endpoint_event =
+        //                                       DEPEVT_XFERNOTREADY };
+        p->status = USB_RET_SUCCESS; // fixes hangs for idevicesyslog and error disconnects when running "launchctl list" or "htop"/"top" using ssh, because iOS likes to send empty packets on high load (when transporting a lot of data out of iOS).
+        //event.status |= DEPEVT_STATUS_TRANSFER_ACTIVE;
+        //p->status = USB_RET_ASYNC;
+        if (buffer == NULL) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: buffer == NULL ; xfer_size 0x%x if_1: USB_RET_ASYNC\n", __func__, xfer_size);
+        }
+        //dwc3_ep_event(s, desc->epid, event);
     }
+    //
     dwc3_bd_unmap(s, desc);
     return xfer_size;
 }
@@ -510,8 +546,6 @@ static void dwc3_td_fetch(DWC3State *s, DWC3Transfer *xfer, dma_addr_t tdaddr)
         desc->length = 0;
         qemu_iovec_init(&desc->iov, 1);
         qemu_sglist_init(&desc->sgl, DEVICE(s), 1, &s->dma_as);
-        QTAILQ_INSERT_TAIL(&xfer->buffers, desc, queue);
-        xfer->count++;
 
         do {
             dma_memory_read(&s->dma_as, tdaddr, &trb, sizeof(trb),
@@ -568,6 +602,8 @@ static void dwc3_td_fetch(DWC3State *s, DWC3Transfer *xfer, dma_addr_t tdaddr)
                 break;
             }
         } while (!ended);
+        QTAILQ_INSERT_TAIL(&xfer->buffers, desc, queue);
+        xfer->count++;
     } while (!ended && xfer->count < 256);
     xfer->tdaddr = tdaddr;
 #ifdef DEBUG_DWC3
@@ -760,25 +796,25 @@ static void dwc3_reset_enter(Object *obj, ResetType type)
               DSTS_RXFIFOEMPTY | DSTS_HIGHSPEED;
 }
 
-static void dwc3_reset_hold(Object *obj)
+static void dwc3_reset_hold(Object *obj, ResetType type)
 {
     DWC3Class *c = DWC3_USB_GET_CLASS(obj);
     DWC3State *s = DWC3_USB(obj);
 
-    if (c->parent_phases.hold) {
-        c->parent_phases.hold(obj);
+    if (c->parent_phases.hold != NULL) {
+        c->parent_phases.hold(obj, type);
     }
 
     dwc3_update_irq(s);
 }
 
-static void dwc3_reset_exit(Object *obj)
+static void dwc3_reset_exit(Object *obj, ResetType type)
 {
     DWC3Class *c = DWC3_USB_GET_CLASS(obj);
     DWC3State *s = DWC3_USB(obj);
 
-    if (c->parent_phases.exit) {
-        c->parent_phases.exit(obj);
+    if (c->parent_phases.exit != NULL) {
+        c->parent_phases.exit(obj, type);
     }
 
     USB_DEVICE(&s->device)->addr = 0;
@@ -1346,17 +1382,17 @@ static uint64_t usb_dwc3_read(void *ptr, hwaddr addr, unsigned size)
             usb_dwc3_depcmdreg_read(ptr, addr, (addr - DEPCMD_REGS_START) >> 2);
         break;
     default:
-        qemu_log_mask(LOG_UNIMP, "%s: addr: 0x%llx\n", __func__, addr);
+        qemu_log_mask(LOG_UNIMP, "%s: addr: 0x%" HWADDR_PRIx "\n", __func__, addr);
         // g_assert_not_reached();
         break;
     };
-    // fprintf(stderr, "%s: addr: 0x%llx val: 0x%llx\n", __func__, addr, val);
+    // fprintf(stderr, "%s: addr: 0x%" HWADDR_PRIx " val: 0x%" PRIx64 "\n", __func__, addr, val);
     return val;
 }
 
 static void usb_dwc3_write(void *ptr, hwaddr addr, uint64_t val, unsigned size)
 {
-    // fprintf(stderr, "%s: addr: 0x%llx val: 0x%llx\n", __func__, addr, val);
+    // fprintf(stderr, "%s: addr: 0x%" HWADDR_PRIx " val: 0x%" PRIx64 "\n", __func__, addr, val);
     switch (addr) {
     case GLOBALS_REGS_START ... GLOBALS_REGS_END:
         usb_dwc3_glbreg_write(ptr, addr, (addr - GLOBALS_REGS_START) >> 2, val);
@@ -1369,7 +1405,7 @@ static void usb_dwc3_write(void *ptr, hwaddr addr, uint64_t val, unsigned size)
                                  val);
         break;
     default:
-        qemu_log_mask(LOG_UNIMP, "%s: addr: 0x%llx val: 0x%llx\n", __func__,
+        qemu_log_mask(LOG_UNIMP, "%s: addr: 0x%" HWADDR_PRIx " val: 0x%" PRIx64 "\n", __func__,
                       addr, val);
         // g_assert_not_reached();
         break;
@@ -1565,6 +1601,9 @@ static void dwc3_usb_device_handle_packet(USBDevice *dev, USBPacket *p)
     }
 
     ep = &s->eps[epid];
+    if (!ep->uep) {
+        return;
+    }
 
     if (p->pid == USB_TOKEN_SETUP && ep->uep->nr == 0) {
         s->eps[0].stalled = false;

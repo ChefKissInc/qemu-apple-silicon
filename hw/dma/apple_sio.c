@@ -1,18 +1,13 @@
 #include "qemu/osdep.h"
-#include "hw/arm/apple-silicon/boot.h"
 #include "hw/arm/apple-silicon/dtb.h"
 #include "hw/dma/apple_sio.h"
-#include "hw/irq.h"
 #include "hw/misc/apple-silicon/a7iop/rtbuddy.h"
-#include "migration/vmstate.h"
+#include "hw/resettable.h"
 #include "qapi/error.h"
-#include "qemu/bitops.h"
 #include "qemu/iov.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "qemu/queue.h"
 #include "sysemu/dma.h"
-#include "sysemu/runstate.h"
 
 // #define DEBUG_SIO
 
@@ -332,7 +327,7 @@ AppleSIODMAEndpoint *apple_sio_get_endpoint(AppleSIOState *s, int ep)
 AppleSIODMAEndpoint *apple_sio_get_endpoint_from_node(AppleSIOState *s,
                                                       DTBNode *node, int idx)
 {
-    DTBProp *prop = find_dtb_prop(node, "dma-channels");
+    DTBProp *prop = dtb_find_prop(node, "dma-channels");
     uint32_t *data;
     int count;
     if (!prop) {
@@ -342,7 +337,7 @@ AppleSIODMAEndpoint *apple_sio_get_endpoint_from_node(AppleSIOState *s,
     if (idx >= count) {
         return NULL;
     }
-    data = (uint32_t *)prop->value;
+    data = (uint32_t *)prop->data;
     return apple_sio_get_endpoint(s, data[8 * idx]);
 }
 
@@ -388,7 +383,6 @@ SysBusDevice *apple_sio_create(DTBNode *node, AppleA7IOPVersion version,
     DTBNode *child;
     DTBProp *prop;
     uint64_t *reg;
-    uint32_t data;
 
     dev = qdev_new(TYPE_APPLE_SIO);
     s = APPLE_SIO(dev);
@@ -396,13 +390,13 @@ SysBusDevice *apple_sio_create(DTBNode *node, AppleA7IOPVersion version,
     rtb = APPLE_RTBUDDY(dev);
     dev->id = g_strdup("sio");
 
-    child = find_dtb_node(node, "iop-sio-nub");
-    assert(child);
+    child = dtb_get_node(node, "iop-sio-nub");
+    g_assert_nonnull(child);
 
-    prop = find_dtb_prop(node, "reg");
-    assert(prop);
+    prop = dtb_find_prop(node, "reg");
+    g_assert_nonnull(prop);
 
-    reg = (uint64_t *)prop->value;
+    reg = (uint64_t *)prop->data;
 
     apple_rtbuddy_init(rtb, NULL, "SIO", reg[1], version, protocol_version,
                        NULL);
@@ -412,10 +406,9 @@ SysBusDevice *apple_sio_create(DTBNode *node, AppleA7IOPVersion version,
                           TYPE_APPLE_SIO ".ascv2-core-reg", reg[3]);
     sysbus_init_mmio(sbd, &s->ascv2_iomem);
 
-    data = 1;
-    set_dtb_prop(child, "pre-loaded", 4, (uint8_t *)&data);
+    dtb_set_prop_u32(child, "pre-loaded", 1);
 #if 0
-    set_dtb_prop(child, "running", 4, (uint8_t *)&data);
+    dtb_set_prop_u32(child, "running", 1);
 #endif
 
     return sbd;
@@ -445,15 +438,15 @@ static void apple_sio_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static void apple_sio_reset(DeviceState *dev)
+static void apple_sio_reset_hold(Object *obj, ResetType type)
 {
     AppleSIOState *s;
     AppleSIOClass *sioc;
 
-    s = APPLE_SIO(dev);
-    sioc = APPLE_SIO_GET_CLASS(dev);
-    if (sioc->parent_reset) {
-        sioc->parent_reset(dev);
+    s = APPLE_SIO(obj);
+    sioc = APPLE_SIO_GET_CLASS(obj);
+    if (sioc->parent_reset.hold != NULL) {
+        sioc->parent_reset.hold(obj, type);
     }
     s->params[PARAM_PROTOCOL] = 9;
     for (int i = 0; i < SIO_NUM_EPS; i++) {
@@ -466,15 +459,18 @@ static void apple_sio_reset(DeviceState *dev)
 
 static void apple_sio_class_init(ObjectClass *klass, void *data)
 {
+    ResettableClass *rc;
     DeviceClass *dc;
     AppleSIOClass *sioc;
 
+    rc = RESETTABLE_CLASS(klass);
     dc = DEVICE_CLASS(klass);
     sioc = APPLE_SIO_CLASS(klass);
 
     device_class_set_parent_realize(dc, apple_sio_realize,
                                     &sioc->parent_realize);
-    device_class_set_parent_reset(dc, apple_sio_reset, &sioc->parent_reset);
+    resettable_class_set_parent_phases(rc, NULL, apple_sio_reset_hold, NULL,
+                                       &sioc->parent_reset);
     dc->desc = "Apple Smart IO DMA Controller";
 }
 

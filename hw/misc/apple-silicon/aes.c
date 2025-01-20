@@ -27,7 +27,7 @@ typedef struct AESCommand {
 typedef struct AESKey {
     QCryptoCipher *cipher;
     key_select_t select;
-    QCryptoCipherAlgorithm algo;
+    QCryptoCipherAlgo algo;
     uint8_t key[32];
     uint32_t len;
     key_func_t func;
@@ -58,6 +58,7 @@ struct AppleAESState {
     AESKey keys[2];
     uint8_t iv[4][16];
     bool stopped;
+    uint32_t board_id;
 };
 
 static uint32_t key_size(uint8_t len)
@@ -74,17 +75,17 @@ static uint32_t key_size(uint8_t len)
     }
 }
 
-static QCryptoCipherAlgorithm key_algo(uint8_t mode)
+static QCryptoCipherAlgo key_algo(uint8_t mode)
 {
     switch (mode) {
     case KEY_LEN_128:
-        return QCRYPTO_CIPHER_ALG_AES_128;
+        return QCRYPTO_CIPHER_ALGO_AES_128;
     case KEY_LEN_192:
-        return QCRYPTO_CIPHER_ALG_AES_192;
+        return QCRYPTO_CIPHER_ALGO_AES_192;
     case KEY_LEN_256:
-        return QCRYPTO_CIPHER_ALG_AES_256;
+        return QCRYPTO_CIPHER_ALGO_AES_256;
     default:
-        return QCRYPTO_CIPHER_ALG__MAX;
+        return QCRYPTO_CIPHER_ALGO__MAX;
     }
 }
 
@@ -368,9 +369,38 @@ static void aes_security_reg_write(void *opaque, hwaddr addr, uint64_t data,
 
 static uint64_t aes_security_reg_read(void *opaque, hwaddr addr, unsigned size)
 {
+    AppleAESState *s;
+
+    s = APPLE_AES(opaque);
+
+#if 0
+    qemu_log_mask(LOG_GUEST_ERROR, "%s: Read 0x" HWADDR_FMT_plx "\n", __func__,
+                  addr);
+#endif
+
     switch (addr) {
+    case 0x00: // unknown0
+        // return 0x00; // panic panic(cpu 0 caller 0xfffffff0090dcdb8):
+        // "AppleS8000AESAccelerator::AES Error: IntStatus 0x0x2021\n" return
+        // 0x0F; // no panic return 0xF0; // panic return 0x07; // no panic
+        // return 0x03; // panic "AppleS8000AESAccelerator::AES Error: IntStatus
+        // 0x0x2021\n" return 0x04; // panic "AppleS8000AESAccelerator::AES
+        // Error: IntStatus 0x0xa1\n" return (1 << 2) | (1 << 1) | (0 << 0); //
+        // panic "AppleS8000AESAccelerator::AES Error: IntStatus 0x0xa1\n"
+        // return (1 << 2) | (0 << 1) | (1 << 0); // no panic
+        // return (0 << 2) | (0 << 1) | (1 << 0); // panic
+        // "AppleS8000AESAccelerator::AES Error: IntStatus 0x0x2021\n" return (0
+        // << 2) | (1 << 1) | (0 << 0); // panic "AppleS8000AESAccelerator::AES
+        // Error: IntStatus 0x0x2021\n" return (1 << 2) | (1 << 1) | (1 << 0);
+        // // no panic
+        return (1 << 2) | (1 << 0);
+        // return 0xFF; // (val & 0xf)
     case 0x20: // board-id
-        return 0x4;
+        // return 0x4;
+        return s->board_id; // (val & 0x1f)
+    case 0x30: // unknown1
+        return 0x00;
+        // return 0xFF; // many various flags
     case 0x34: // bit 24 = is fresh boot?
         return (1 << 24) | (1 << 25);
     default: // We don't know the rest
@@ -665,7 +695,7 @@ static void apple_aes_unrealize(DeviceState *dev)
     qemu_mutex_destroy(&s->queue_mutex);
 }
 
-SysBusDevice *apple_aes_create(DTBNode *node)
+SysBusDevice *apple_aes_create(DTBNode *node, uint32_t board_id)
 {
     DeviceState *dev;
     AppleAESState *s;
@@ -677,10 +707,10 @@ SysBusDevice *apple_aes_create(DTBNode *node)
     s = APPLE_AES(dev);
     sbd = SYS_BUS_DEVICE(dev);
 
-    prop = find_dtb_prop(node, "reg");
+    prop = dtb_find_prop(node, "reg");
     g_assert_nonnull(prop);
 
-    reg = (uint64_t *)prop->value;
+    reg = (uint64_t *)prop->data;
 
     /*
      * 0: aesMemoryMap
@@ -799,7 +829,7 @@ static void apple_aes_class_init(ObjectClass *klass, void *data)
 
     dc->realize = apple_aes_realize;
     dc->unrealize = apple_aes_unrealize;
-    dc->reset = apple_aes_reset;
+    device_class_set_legacy_reset(dc, apple_aes_reset);
     dc->desc = "Apple AES Accelerator";
     dc->vmsd = &vmstate_apple_aes;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);

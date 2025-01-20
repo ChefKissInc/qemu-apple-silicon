@@ -1,7 +1,7 @@
 /*
  * Apple NVMe MMU Controller.
  *
- * Copyright (c) 2023-2024 Visual Ehrmanntraut (VisualEhrmanntraut).
+ * Copyright (c) 2023-2025 Visual Ehrmanntraut (VisualEhrmanntraut).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -58,10 +58,10 @@ SysBusDevice *apple_nvme_mmu_create(DTBNode *node)
 
     pcie_host_mmcfg_init(pex, PCIE_MMCFG_SIZE_MAX);
 
-    prop = find_dtb_prop(node, "reg");
+    prop = dtb_find_prop(node, "reg");
     assert(prop);
 
-    reg = (uint64_t *)prop->value;
+    reg = (uint64_t *)prop->data;
 
     memory_region_init(&s->io_mmio, OBJECT(s), "nvme_mmu_pci_mmio", reg[1]);
     sysbus_init_mmio(sbd, &s->io_mmio);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024 Visual Ehrmanntraut.
+ * Copyright (c) 2023-2025 Visual Ehrmanntraut.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -16,6 +16,11 @@
 
 #ifndef HW_ARM_APPLE_SILICON_BOOT_H
 #define HW_ARM_APPLE_SILICON_BOOT_H
+
+// #define ENABLE_BASEBAND
+#define ENABLE_SEP
+#define ENABLE_SEP_SECURITY
+// #define ENABLE_ROSWELL
 
 #include "qemu/osdep.h"
 #include "exec/hwaddr.h"
@@ -148,6 +153,8 @@ typedef struct {
     uint32_t reserved;
 } MachoHeader64;
 
+extern MachoHeader64 *xnu_header;
+
 typedef struct {
     uint32_t cmd;
     uint32_t cmd_size;
@@ -169,12 +176,12 @@ typedef struct {
 #define N_EXT (0x01)
 
 typedef struct {
-    unsigned long base_addr;
-    unsigned long display;
-    unsigned long row_bytes;
-    unsigned long width;
-    unsigned long height;
-    unsigned long depth;
+    uint64_t base_addr;
+    uint64_t display;
+    uint64_t row_bytes;
+    uint64_t width;
+    uint64_t height;
+    uint64_t depth;
 } AppleVideoArgs;
 
 typedef struct {
@@ -277,7 +284,7 @@ typedef struct {
     hwaddr dram_base;
     uint64_t dram_size;
     uint8_t nvram_data[XNU_MAX_NVRAM_SIZE];
-    uint64_t nvram_size;
+    uint32_t nvram_size;
     char *ticket_data;
     uint64_t ticket_length;
     uint8_t boot_nonce_hash[XNU_BNCH_SIZE];

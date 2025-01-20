@@ -1,8 +1,8 @@
 /*
  * Apple A13 CPU.
  *
- * Copyright (c) 2023-2024 Visual Ehrmanntraut (VisualEhrmanntraut).
- * Copyright (c) 2023 Christian Inci (chris-pcguy).
+ * Copyright (c) 2023-2025 Visual Ehrmanntraut (VisualEhrmanntraut).
+ * Copyright (c) 2023-2025 Christian Inci (chris-pcguy).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -26,6 +26,7 @@
 #include "hw/irq.h"
 #include "hw/or-irq.h"
 #include "hw/qdev-properties.h"
+#include "hw/resettable.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -129,6 +130,20 @@ void apple_a13_cpu_start(AppleA13State *tcpu)
 
     if (ret != QEMU_ARM_POWERCTL_RET_SUCCESS) {
         error_report("Failed to bring up CPU %d: err %d", tcpu->cpu_id, ret);
+    }
+}
+
+void apple_a13_cpu_reset(AppleA13State *tcpu)
+{
+    int ret = QEMU_ARM_POWERCTL_RET_SUCCESS;
+
+    if (ARM_CPU(tcpu)->power_state != PSCI_OFF) {
+        ret = arm_reset_cpu(tcpu->mpidr);
+    }
+
+    if (ret != QEMU_ARM_POWERCTL_RET_SUCCESS) {
+        error_report("%s: failed to reset CPU %d: err %d", __func__,
+                     tcpu->cpu_id, ret);
     }
 }
 
@@ -616,10 +631,12 @@ static void apple_a13_realize(DeviceState *dev, Error **errp)
     tcpu->fast_ipi = qdev_get_gpio_in(fiq_or, 1);
 }
 
-static void apple_a13_reset(DeviceState *dev)
+static void apple_a13_reset_hold(Object *obj, ResetType type)
 {
-    AppleA13Class *tclass = APPLE_A13_GET_CLASS(dev);
-    tclass->parent_reset(dev);
+    AppleA13Class *tclass = APPLE_A13_GET_CLASS(obj);
+    if (tclass->parent_phases.hold != NULL) {
+        tclass->parent_phases.hold(obj, type);
+    }
 }
 
 static void apple_a13_instance_init(Object *obj)
@@ -641,7 +658,6 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
     ARMCPU *cpu;
     Object *obj;
     DTBProp *prop;
-    uint64_t freq;
     uint64_t *reg;
 
     obj = object_new(TYPE_APPLE_A13);
@@ -650,20 +666,20 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
     cpu = ARM_CPU(tcpu);
 
     if (node) {
-        prop = find_dtb_prop(node, "name");
-        dev->id = g_strdup((char *)prop->value);
+        prop = dtb_find_prop(node, "name");
+        dev->id = g_strdup((char *)prop->data);
 
-        prop = find_dtb_prop(node, "cpu-id");
+        prop = dtb_find_prop(node, "cpu-id");
         g_assert_cmpuint(prop->length, ==, 4);
-        tcpu->cpu_id = *(unsigned int *)prop->value;
+        tcpu->cpu_id = *(unsigned int *)prop->data;
 
-        prop = find_dtb_prop(node, "reg");
+        prop = dtb_find_prop(node, "reg");
         g_assert_cmpuint(prop->length, ==, 4);
-        tcpu->phys_id = *(unsigned int *)prop->value;
+        tcpu->phys_id = *(unsigned int *)prop->data;
 
-        prop = find_dtb_prop(node, "cluster-id");
+        prop = dtb_find_prop(node, "cluster-id");
         g_assert_cmpuint(prop->length, ==, 4);
-        tcpu->cluster_id = *(unsigned int *)prop->value;
+        tcpu->cluster_id = *(unsigned int *)prop->data;
     } else {
         dev->id = g_strdup(name);
         tcpu->cpu_id = cpu_id;
@@ -679,8 +695,8 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
     cpu->midr = FIELD_DP64(cpu->midr, MIDR_EL1, REVISION, 0x1);
 
     if (node) {
-        prop = find_dtb_prop(node, "cluster-type");
-        cluster_type = *prop->value;
+        prop = dtb_find_prop(node, "cluster-type");
+        cluster_type = *prop->data;
     }
     switch (cluster_type) {
     case 'P': // Lightning
@@ -696,22 +712,14 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
 
     object_property_set_uint(obj, "mp-affinity", tcpu->mpidr, &error_fatal);
 
-    if (node) {
-        /* remove debug regs from device tree */
-        prop = find_dtb_prop(node, "reg-private");
-        if (prop) {
-            remove_dtb_prop(node, prop);
-        }
-
-        prop = find_dtb_prop(node, "cpu-uttdbg-reg");
-        if (prop) {
-            remove_dtb_prop(node, prop);
-        }
+    if (node != NULL) {
+        dtb_remove_prop_named(node, "reg-private");
+        dtb_remove_prop_named(node, "cpu-uttdbg-reg");
     }
 
     if (tcpu->cpu_id == 0 || node == NULL) {
-        if (node) {
-            set_dtb_prop(node, "state", 8, "running");
+        if (node != NULL) {
+            dtb_set_prop(node, "state", 8, "running");
         }
         object_property_set_bool(obj, "start-powered-off", false, NULL);
     } else {
@@ -723,14 +731,12 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
 
     // Need to set the CPU frequencies instead of iBoot
     if (node) {
-        freq = 24000000;
-
-        set_dtb_prop(node, "timebase-frequency", sizeof(freq), &freq);
-        set_dtb_prop(node, "fixed-frequency", sizeof(freq), &freq);
-        set_dtb_prop(node, "peripheral-frequency", sizeof(freq), &freq);
-        set_dtb_prop(node, "memory-frequency", sizeof(freq), &freq);
-        set_dtb_prop(node, "bus-frequency", sizeof(freq), &freq);
-        set_dtb_prop(node, "clock-frequency", sizeof(freq), &freq);
+        dtb_set_prop_u64(node, "timebase-frequency", 24000000);
+        dtb_set_prop_u64(node, "fixed-frequency", 24000000);
+        dtb_set_prop_u64(node, "peripheral-frequency", 24000000);
+        dtb_set_prop_u64(node, "memory-frequency", 24000000);
+        dtb_set_prop_u64(node, "bus-frequency", 24000000);
+        dtb_set_prop_u64(node, "clock-frequency", 24000000);
     }
 
     object_property_set_bool(obj, "has_el3", false, NULL);
@@ -742,11 +748,11 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
     memory_region_add_subregion_overlap(&tcpu->memory, 0, &tcpu->sysmem, -2);
 
     if (node) {
-        prop = find_dtb_prop(node, "cpu-impl-reg");
+        prop = dtb_find_prop(node, "cpu-impl-reg");
         if (prop) {
             g_assert_cmpuint(prop->length, ==, 16);
 
-            reg = (uint64_t *)prop->value;
+            reg = (uint64_t *)prop->data;
 
             memory_region_init_ram_device_ptr(&tcpu->impl_reg, obj,
                                               TYPE_APPLE_A13 ".impl-reg",
@@ -755,11 +761,11 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
                                         &tcpu->impl_reg);
         }
 
-        prop = find_dtb_prop(node, "coresight-reg");
+        prop = dtb_find_prop(node, "coresight-reg");
         if (prop) {
             g_assert_cmpuint(prop->length, ==, 16);
 
-            reg = (uint64_t *)prop->value;
+            reg = (uint64_t *)prop->data;
 
             memory_region_init_ram_device_ptr(&tcpu->coresight_reg, obj,
                                               TYPE_APPLE_A13 ".coresight-reg",
@@ -768,10 +774,10 @@ AppleA13State *apple_a13_cpu_create(DTBNode *node, char *name, uint32_t cpu_id,
                                         &tcpu->coresight_reg);
         }
 
-        prop = find_dtb_prop(node, "cpm-impl-reg");
+        prop = dtb_find_prop(node, "cpm-impl-reg");
         if (prop) {
             g_assert_cmpuint(prop->length, ==, 16);
-            memcpy(tcpu->cluster_reg, prop->value, 16);
+            memcpy(tcpu->cluster_reg, prop->data, prop->length);
         }
     }
     return tcpu;
@@ -854,11 +860,13 @@ static const VMStateDescription vmstate_apple_a13_cluster = {
 
 static void apple_a13_class_init(ObjectClass *klass, void *data)
 {
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
     AppleA13Class *tc = APPLE_A13_CLASS(klass);
 
     device_class_set_parent_realize(dc, apple_a13_realize, &tc->parent_realize);
-    device_class_set_parent_reset(dc, apple_a13_reset, &tc->parent_reset);
+    resettable_class_set_parent_phases(rc, NULL, apple_a13_reset_hold, NULL,
+                                       &tc->parent_phases);
     dc->desc = "Apple A13 CPU";
     dc->vmsd = &vmstate_apple_a13;
     set_bit(DEVICE_CATEGORY_CPU, dc->categories);
@@ -870,7 +878,7 @@ static void apple_a13_cluster_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = apple_a13_cluster_realize;
-    dc->reset = apple_a13_cluster_reset;
+    device_class_set_legacy_reset(dc, apple_a13_cluster_reset);
     dc->desc = "Apple A13 CPU Cluster";
     dc->user_creatable = false;
     dc->vmsd = &vmstate_apple_a13_cluster;
